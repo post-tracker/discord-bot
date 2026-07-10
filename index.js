@@ -1,3 +1,4 @@
+const http = require( 'http' );
 const https = require( 'https' );
 
 const { Client, GatewayIntentBits, Events } = require( 'discord.js' );
@@ -51,7 +52,8 @@ const client = new Client( {
 // promise (skipped, retried next tick) instead of throwing uncaught.
 const getJSON = function getJSON ( requestUrl ) {
     return new Promise( ( resolve, reject ) => {
-        const request = https.get( requestUrl, ( response ) => {
+        const transport = requestUrl.startsWith( 'https:' ) ? https : http;
+        const request = transport.get( requestUrl, ( response ) => {
             if ( response.statusCode < 200 || response.statusCode > 299 ) {
                 reject( new Error( `GET ${ requestUrl } -> HTTP ${ response.statusCode }` ) );
                 response.resume();
