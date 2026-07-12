@@ -105,6 +105,44 @@ const fetchGames = async function fetchGames () {
     } );
 };
 
+// HEAD-check a URL, resolving to the HTTP status code. Used to confirm the
+// static site page actually exists before we announce it — the site is a
+// separately-built Cloudflare deploy, so a game can be live in the API minutes
+// before its page is published. Announcing early = a dead link.
+const headStatus = function headStatus ( requestUrl ) {
+    return new Promise( ( resolve, reject ) => {
+        const transport = requestUrl.startsWith( 'https:' ) ? https : http;
+        const request = transport.request( requestUrl, { method: 'HEAD' }, ( response ) => {
+            response.resume();
+            resolve( response.statusCode );
+        } );
+
+        request.on( 'error', ( requestError ) => {
+            reject( requestError );
+        } );
+
+        request.setTimeout( 15000, () => {
+            request.destroy( new Error( `HEAD ${ requestUrl } timed out` ) );
+        } );
+
+        request.end();
+    } );
+};
+
+const isPageLive = async function isPageLive ( url ) {
+    try {
+        const status = await headStatus( url );
+
+        // A published page returns 200. Some hosts answer HEAD with 405/403 but
+        // still serve the page — treat those as live too. A 404 means not yet.
+        return status === 200 || status === 405 || status === 403;
+    } catch ( checkError ) {
+        console.error( `[page-check] ${ url }: ${ checkError.message }` );
+
+        return false;
+    }
+};
+
 const announceGame = async function announceGame ( game ) {
     const channel = await client.channels.fetch( ANNOUNCE_CHANNEL_ID );
 
@@ -143,9 +181,29 @@ const checkForNewGames = async function checkForNewGames () {
     }
 
     for ( const game of games ) {
-        // SADD returns 1 when the member was newly added, 0 if it already
-        // existed — an atomic "is this new?" check that also records it, so a
-        // crash mid-loop never re-announces an already-added game.
+        // Skip games we've already announced (in the known-set). We check
+        // membership first WITHOUT adding, so that a game whose page isn't
+        // built yet stays out of the set and is retried on the next tick.
+        const alreadyKnown = await redis.sismember( KNOWN_GAMES_KEY, game.identifier );
+
+        if ( alreadyKnown === 1 ) {
+            continue;
+        }
+
+        // The site is a separately-built static deploy, so a new game can be
+        // live in the API minutes before its page is published. Announcing now
+        // would post a dead link — wait until the page actually resolves.
+        const url = `${ SITE_BASE }/${ game.identifier }`;
+        const pageLive = await isPageLive( url );
+
+        if ( !pageLive ) {
+            console.log( `Page not live yet, deferring announce: ${ game.identifier }` );
+
+            continue;
+        }
+
+        // Page confirmed live — claim the game atomically. SADD returns 1 when
+        // newly added; 0 means a concurrent tick already grabbed it (skip).
         const added = await redis.sadd( KNOWN_GAMES_KEY, game.identifier );
 
         if ( added === 1 ) {
